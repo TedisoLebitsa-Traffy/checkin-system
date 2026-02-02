@@ -1,110 +1,95 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-
-#============================Imports===============================================
-import time             
+import time
 import csv
 from datetime import datetime
 from pathlib import Path
 
-# ---------- OLED (luma.oled) ----------
-from luma.core.interface.serial import i2c
-from luma.oled.device import ssd1306,ssd1309  # change if you use sh1106 etc.
-from PIL import Image, ImageDraw, ImageFont
-
-
-
-# ---------- UART ----------
 import serial
 from keypad import KeypadUART
-
-# -------- OLED ---------
-from luma.core.interface.serial import i2c
-from luma.oled.device import ssd1306,ssd1309  # change if you use sh1106 etc.
-from PIL import Image, ImageDraw, ImageFont
 from oled import OLED
-t = datetime.now().strftime("%H:%M:%S")
-
 
 # =========================
 # Config
 # =========================
-KEYPAD_PORT = "/dev/ttyUSB0"      # or "/dev/ttyUSB0" if USB-serial adapter
-KEYPAD_BAUD = 9600                # set to your keypad baud
+KEYPAD_PORT = "/dev/ttyUSB0"
+KEYPAD_BAUD = 9600
 
-FINGER_PORT = "/dev/ttyUSB1"      # example if fingerprint is another USB-serial
-FINGER_BAUD = 9600                # common fingerprint baud (adjust)
+FINGER_PORT = "/dev/ttyUSB1"
+FINGER_BAUD = 9600
 
-LOG_PATH = Path("checkins.csv")   # This is the list for the users.
+# --- READ-ONLY USER LIST (DO NOT WRITE HERE) ---
+USERS_CSV = Path("checkins.csv")          # <-- this is your employee list file
+USER_NAME_COL = "Employee Name"
+USER_CODE_COL = "Code"
 
-def load_valid_codes_from_csv(csv_path):
+# --- SEPARATE LOG FILE (WRITE HERE) ---
+ATTENDANCE_LOG = Path("attendance_log.csv")
+
+
+def load_valid_codes_from_csv(csv_path: Path) -> dict:
     """
     Loads employee names and codes from a CSV file.
-    Returns a dict mapping code (str) -> employee name (str).
+    Returns dict mapping code (str) -> employee name (str).
     """
-    codes = {}
+    if not csv_path.exists():
+        raise FileNotFoundError(f"User list CSV not found: {csv_path}")
 
-    with open(csv_path, newline="", encoding="utf-8") as f:
+    codes = {}
+    with csv_path.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            name = row["Employee Name"].strip()
-            code = row["Code"].strip()
-            codes[code] = name
-
+            name = (row.get(USER_NAME_COL) or "").strip()
+            code = (row.get(USER_CODE_COL) or "").strip()
+            if code:
+                codes[code] = name or "UNKNOWN"
     return codes
-# =========================
-# Logging
-# =========================
-def log_checkin(user_id, method, result):
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    new_file = not LOG_PATH.exists()                  # This line checks if we need a new file
 
-    with LOG_PATH.open("a", newline="") as f:
+
+def log_attendance(employee_name: str, code: str, method: str, result: str) -> None:
+    """
+    Appends to attendance_log.csv (separate from the user list).
+    Includes date + time at the moment the person logs in.
+    """
+    ATTENDANCE_LOG.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not ATTENDANCE_LOG.exists()
+
+    now = datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H:%M:%S")
+
+    with ATTENDANCE_LOG.open("a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new_file:
-            w.writerow(["timestamp", "user_id", "method", "result"])
-        w.writerow([datetime.now().isoformat(timespec="seconds"), user_id, method, result])
+            w.writerow(["date", "time", "employee_name", "code", "method", "result"])
+        w.writerow([date_str, time_str, employee_name, code, method, result])
 
 
 # =========================
 # Fingerprint reader (placeholder)
 # =========================
 class FingerprintSensor:
-    """
-    Fingerprint sensors vary a lot.
-
-    Goal: produce events like:
-      ('finger_ok', 'USER_001')
-      ('finger_fail', None)
-
-    Replace poll() with the library/protocol for your sensor.
-    """
     def __init__(self, port, baud):
-        # If your fingerprint sensor is not connected yet, you can comment this out temporarily.
         self.ser = serial.Serial(port, baudrate=baud, timeout=0)
 
     def poll(self):
-        # ---- YOU WILL EDIT THIS ----
-        # Placeholder: no events unless you implement sensor protocol.
-        # If your sensor has a python library, use it here and return events.
         return []
 
 
 # =========================
 # Main App
 # =========================
-
 class CheckInApp:
     def __init__(self):
         self.oled = OLED()
-
         self.keypad = KeypadUART(KEYPAD_PORT, KEYPAD_BAUD)
 
-        # If you don’t have the fingerprint connected yet, comment this line and keep self.finger = None
-        try:
-            self.finger = reader.scan_code_until_correct()
-        except Exception:
-            self.finger = None
+        # Load user list ONCE (faster) — reload if you want live updates
+        self.valid_codes = load_valid_codes_from_csv(USERS_CSV)
+
+        # Finger sensor placeholder
+        self.finger = None
 
         self.state = "IDLE"
         self.code = ""
@@ -124,40 +109,59 @@ class CheckInApp:
         ])
 
     def show_code(self):
-        masked = self.code
         self.oled.show_lines([
             "ENTER CODE:",
-            masked,
+            self.code,
             "Enter = submit",
             "Back = delete",
         ])
 
     def process_code(self):
-        VALID_CODES = load_valid_codes_from_csv("Time.csv")
-        user_id = VALID_CODES.get(self.code)
-        if user_id:
-            log_checkin(user_id, "code", "success")
-            
+        # Get name from read-only list
+        employee_name = self.valid_codes.get(self.code)
+
+        now = datetime.now()
+        t_now = now.strftime("%H:%M:%S")
+
+        if employee_name:
+            # Log to separate attendance file (NOT the user list)
+            log_attendance(employee_name, self.code, "code", "success")
+
             self.oled.show_lines([
-                f"Hi {user_id}",
+                f"Hi {employee_name}",
                 "You arrived at:",
-                t,""
-                ])
-
-
-
-
+                t_now,
+                "",
+            ])
             time.sleep(5)
+
         else:
-            log_checkin(self.code, "code", "fail")  # logs raw code as user_id field; you can change
-            self.oled.show_lines(["DENIED ?", "Invalid code", "", ""])
+            # Still log failed attempts, but to the attendance log file
+            log_attendance("UNKNOWN", self.code, "code", "fail")
+            self.oled.show_lines(["DENIED", "Invalid code", "", ""])
             time.sleep(1.5)
+
         self.reset()
 
-    def process_finger(self, user_id):
-        # user_id should come from the fingerprint match
-        log_checkin(user_id, "finger", "success")
-        self.oled.show_lines(["SUCCESS ?", f"ID: {user_id}", "Method: FINGER", ""])
+    def process_finger(self, user_code_or_id: str):
+        """
+        If your fingerprint returns a code/ID, you can map it to a name here.
+        For now we log it directly.
+        """
+        now = datetime.now()
+        t_now = now.strftime("%H:%M:%S")
+
+        # If the finger sensor returns a CODE that exists in your list, map it:
+        employee_name = self.valid_codes.get(str(user_code_or_id), "UNKNOWN")
+
+        log_attendance(employee_name, str(user_code_or_id), "finger", "success")
+
+        self.oled.show_lines([
+            "SUCCESS",
+            f"{employee_name}",
+            t_now,
+            "",
+        ])
         time.sleep(1.5)
         self.reset()
 
@@ -165,20 +169,18 @@ class CheckInApp:
         self.show_idle()
 
         while True:
-            # Timeout: if user started typing then stops, reset after 10s
+            # Timeout typing
             if self.state == "ENTERING_CODE" and (time.time() - self.last_action_ts) > 10:
                 self.reset()
                 self.show_idle()
 
-            # Gather input events
             events = []
             events += self.keypad.poll()
 
-            if self.finger:
-                self.oled.show_lines(["Invalid code", "Need 5 keys", "Try again", ""])
-                time.sleep(5)
+            # Finger events would be appended here if implemented:
+            # if self.finger:
+            #     events += self.finger.poll()
 
-            # Handle events
             for ev, val in events:
                 if ev == "key":
                     if self.state == "IDLE":
@@ -196,30 +198,33 @@ class CheckInApp:
                         self.last_action_ts = time.time()
                         self.show_code()
 
-                elif ev == "enter" :
+                elif ev == "enter":
                     if self.state == "ENTERING_CODE":
-                        if len(self.code) != 5 :
+                        if len(self.code) != 5:
                             self.oled.show_lines(["Invalid code", "Need 5 keys", "Try again", ""])
-                            time.sleep(0.5)
+                            time.sleep(0.8)
                             self.show_idle()
-
-                        else :
+                            self.reset()
+                        else:
                             self.process_code()
                             self.show_idle()
 
                 elif ev == "finger_ok":
-                    # val should be matched user_id
                     self.process_finger(val)
                     self.show_idle()
 
                 elif ev == "finger_fail":
+                    log_attendance("UNKNOWN", "", "finger", "fail")
                     self.oled.show_lines(["TRY AGAIN", "Finger not found", "", ""])
                     time.sleep(1.2)
                     self.show_idle()
 
             time.sleep(0.02)
 
+
 if __name__ == "__main__":
     app = CheckInApp()
     app.run()
+
+
 
