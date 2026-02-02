@@ -133,7 +133,7 @@ class CheckInApp:
         ])
 
     def process_code(self):
-        VALID_CODES = load_valid_codes_from_csv("checkins.csv")
+        VALID_CODES = load_valid_codes_from_csv("Time.csv")
         user_id = VALID_CODES.get(self.code)
         if user_id:
             log_checkin(user_id, "code", "success")
