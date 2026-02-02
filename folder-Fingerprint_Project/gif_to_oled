@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import time
+import subprocess
+from pathlib import Path
+from PIL import Image
+from oled import OLED
+
+FRAMES_DIR = Path("idle_frames")
+FPS = 200              # start low; increase later if stable
+RETRIES = 5
+RETRY_DELAY = 0.05   # seconds
+RESET_ON_FAIL = True # try to recover automatically
+
+
+def i2c_soft_reset():
+    """
+    Soft-recover I2C by reloading kernel modules.
+    Works on Raspberry Pi OS in most cases.
+    """
+    try:
+        subprocess.run(["sudo", "modprobe", "-r", "i2c_bcm2835"], check=False)
+        time.sleep(0.1)
+        subprocess.run(["sudo", "modprobe", "i2c_bcm2835"], check=False)
+        time.sleep(0.1)
+    except Exception:
+        pass
+
+
+def safe_display(oled, img):
+    """
+    Try multiple times to write to OLED.
+    If it fails repeatedly, optionally soft reset I2C and try again.
+    """
+    img = img.convert("1")
+
+    for attempt in range(RETRIES):
+        try:
+            oled.device.display(img)
+            return True
+        except OSError:
+            time.sleep(RETRY_DELAY)
+
+    if RESET_ON_FAIL:
+        i2c_soft_reset()
+        # one more attempt after reset
+        try:
+            oled = OLED()  # re-init OLED object + bus
+            oled.device.display(img)
+            return True
+        except Exception:
+            return False
+
+    return False
+
+
+def main():
+    oled = OLED()
+    frames = sorted(FRAMES_DIR.glob("frame_*.png"))
+    if not frames:
+        raise FileNotFoundError("No frames found. Run your GIF->frames converter first.")
+
+    delay = 1.0 / FPS
+
+    while True:
+        for fp in frames:
+            img = Image.open(fp)
+            ok = safe_display(oled, img)
+            if not ok:
+                # Don't crash; show a message and keep looping
+                try:
+                    oled.show_lines(["I2C ERROR", "CHECK WIRING", "RETRYING...", ""])
+                except Exception:
+                    pass
+                time.sleep(1.0)
+                oled = OLED()  # re-init
+            time.sleep(delay)
+
+
+if __name__ == "__main__":
+    main()
