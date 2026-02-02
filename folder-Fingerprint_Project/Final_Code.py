@@ -76,7 +76,6 @@ class FingerprintSensor:
     def poll(self):
         return []
 
-
 # =========================
 # Main App
 # =========================
