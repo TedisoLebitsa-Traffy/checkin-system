@@ -177,7 +177,6 @@ def main():
         if ret != 0:
             print(f"Connect failed, code: {ret}")
             return
-
         # New flow:
         ask_and_enroll_flow(sensor)
 
