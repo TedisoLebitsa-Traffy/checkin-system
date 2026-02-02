@@ -269,7 +269,7 @@ def enroll_for_user(sensor: FingerVeinSensor, selected_user: dict, oled: OLED, k
         time.sleep(2)
         return
 
-    # ✅ link finger_id -> CSV code
+    # ? link finger_id -> CSV code
     finger_code_map[str(finger_id)] = user_code
     save_json(MAP_FILE, finger_code_map)
 
