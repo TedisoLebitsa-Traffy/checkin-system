@@ -9,6 +9,7 @@ import queue
 from pathlib import Path
 from datetime import datetime
 
+from PIL import Image  # <-- needed for idle frames
 from oled import OLED
 from keypad import KeypadUART
 from fingerprint_sensor import FingerVeinSensor
@@ -27,10 +28,103 @@ USER_CODE_COL = "Code"
 ATTENDANCE_LOG = Path("attendance_log.csv")
 
 # Mapping files
-MAP_FILE = Path("finger_code_map.json")            # finger_id(str) -> user_code(str)
-USER_FINGER_MAP_FILE = Path("user_finger_map.json")# user_code(str) -> {finger_id, code, name}
+MAP_FILE = Path("finger_code_map.json")             # finger_id(str) -> user_code(str)
+USER_FINGER_MAP_FILE = Path("user_finger_map.json") # user_code(str) -> {finger_id, code, name}
 
 ITEMS_PER_PAGE = 2  # OLED 4 lines => 2 users shown
+
+# ---- Idle animation settings ----
+IDLE_FRAMES_DIR = Path("idle_frames")
+IDLE_FPS = 8           # safe start; raise if stable
+IDLE_STEP = 3          # frame skipping (bigger = faster animation)
+IDLE_RETRIES = 3       # retry OLED display on occasional I2C glitches
+
+
+# =========================
+# Idle Animator (frames -> OLED)
+# =========================
+class IdleAnimator:
+    """
+    Non-blocking OLED animation from pre-rendered frames (PNG files).
+
+    Usage:
+      idle = IdleAnimator(oled, "idle_frames", fps=8, step=3)
+      idle.enable()
+      # in loop when IDLE:
+      idle.tick()
+
+    Notes:
+      - step controls perceived speed more than fps
+      - fps controls how often we try to push a new full frame over I2C
+    """
+    def __init__(self, oled: OLED, frames_dir: Path, fps=8, step=1, retries=2, retry_delay=0.03):
+        self.oled = oled
+        self.frames_dir = Path(frames_dir)
+        self.fps = float(fps)
+        self.step = max(1, int(step))
+        self.retries = int(retries)
+        self.retry_delay = float(retry_delay)
+
+        self.enabled = False
+        self._frames = []
+        self._idx = 0
+        self._last_ts = 0.0
+
+        self.reload()
+
+    def reload(self):
+        self._frames = sorted(self.frames_dir.glob("frame_*.png"))
+        if not self._frames:
+            raise FileNotFoundError(
+                f"No frames found in {self.frames_dir}. Expected frame_001.png etc."
+            )
+        self._idx = 0
+        self._last_ts = 0.0
+
+    def enable(self, reset=True):
+        self.enabled = True
+        if reset:
+            self._idx = 0
+            self._last_ts = 0.0
+
+    def disable(self):
+        self.enabled = False
+
+    def set_fps(self, fps):
+        self.fps = float(fps)
+
+    def set_step(self, step):
+        self.step = max(1, int(step))
+
+    def _safe_display(self, img: Image.Image) -> bool:
+        img = img.convert("1")
+        for _ in range(self.retries):
+            try:
+                self.oled.device.display(img)
+                return True
+            except OSError:
+                time.sleep(self.retry_delay)
+        return False
+
+    def tick(self) -> bool:
+        if not self.enabled:
+            return False
+
+        now = time.time()
+        interval = 1.0 / self.fps if self.fps > 0 else 0.0
+        if (now - self._last_ts) < interval:
+            return False
+
+        fp = self._frames[self._idx]
+        img = Image.open(fp)
+
+        ok = self._safe_display(img)
+        self._last_ts = now
+
+        # Advance by step (this controls speed a lot)
+        self._idx = (self._idx + self.step) % len(self._frames)
+        return ok
+
 
 # =========================
 # Helpers
@@ -77,6 +171,7 @@ def log_attendance(employee_name: str, code: str, method: str, result: str) -> N
 def _short(s: str, max_len: int = 21) -> str:
     s = (s or "").strip()
     return s if len(s) <= max_len else (s[: max_len - 1] + ".")
+
 
 # =========================
 # Enrollment UI (OLED)
@@ -174,7 +269,7 @@ def enroll_for_user(sensor: FingerVeinSensor, selected_user: dict, oled: OLED, k
         time.sleep(2)
         return
 
-    # ✅ Key fix: link finger_id -> CSV code
+    # ✅ link finger_id -> CSV code
     finger_code_map[str(finger_id)] = user_code
     save_json(MAP_FILE, finger_code_map)
 
@@ -189,8 +284,9 @@ def enrollment_flow(sensor: FingerVeinSensor, oled: OLED, keypad: KeypadUART) ->
     selected = choose_user_oled(users, oled, keypad)
     enroll_for_user(sensor, selected, oled, keypad)
 
+
 # =========================
-# Finger scan background thread (so keypad stays responsive)
+# Finger scan background thread
 # =========================
 class FingerWorker(threading.Thread):
     def __init__(self, sensor: FingerVeinSensor, out_q: queue.Queue):
@@ -205,11 +301,11 @@ class FingerWorker(threading.Thread):
     def run(self):
         while not self._stop.is_set():
             try:
-                fid = self.sensor.verify_and_get_id(user_id=0)  # blocks until a scan completes
+                fid = self.sensor.verify_and_get_id(user_id=0)  # blocks until scan completes
                 self.out_q.put(("finger_ok", fid))
             except Exception:
-                # ignore noisy failures; small delay
                 time.sleep(0.2)
+
 
 # =========================
 # Main App
@@ -218,6 +314,15 @@ class App:
     def __init__(self):
         self.oled = OLED()
         self.keypad = KeypadUART(KEYPAD_PORT, KEYPAD_BAUD)
+
+        # Idle animator
+        self.idle = IdleAnimator(
+            oled=self.oled,
+            frames_dir=IDLE_FRAMES_DIR,
+            fps=IDLE_FPS,
+            step=IDLE_STEP,
+            retries=IDLE_RETRIES
+        )
 
         self.sensor = FingerVeinSensor(baud_index=3)
         ret = self.sensor.connect(SENSOR_PASSWORD)
@@ -235,6 +340,8 @@ class App:
         self.fw = FingerWorker(self.sensor, self.fq)
         self.fw.start()
 
+        self.enter_idle()
+
     def shutdown(self):
         try:
             self.fw.stop()
@@ -245,10 +352,19 @@ class App:
         except Exception:
             pass
 
-    def show_idle(self):
-        self.oled.show_lines(["CHECK-IN SYSTEM", "ENTER CODE OR", "SCAN FINGER", ""])
+    # ----- Idle control -----
+    def enter_idle(self):
+        self.state = "IDLE"
+        self.buf = ""
+        self.idle.enable(reset=False)  # keep animation position
+        # Do NOT call show_lines here; the animator owns the OLED during idle
 
+    def exit_idle(self):
+        self.idle.disable()
+
+    # ----- UI screens (disable idle first so it doesn't overwrite) -----
     def show_buf(self):
+        self.exit_idle()
         self.oled.show_lines(["ENTER CODE:", self.buf, "ENTER=submit", "BACK=delete"])
 
     def finger_lookup(self, finger_id: int):
@@ -260,6 +376,7 @@ class App:
         return (True, code, name)
 
     def prompt_enroll(self) -> bool:
+        self.exit_idle()
         self.oled.show_lines(["FINGER UNKNOWN", "ENROLL NOW?", "ENTER=yes", "BACK=no"])
         start = time.time()
         while time.time() - start < 10:
@@ -272,6 +389,7 @@ class App:
         return False
 
     def handle_finger(self, finger_id: int):
+        self.exit_idle()
         enrolled, code, name = self.finger_lookup(finger_id)
         t_now = datetime.now().strftime("%H:%M:%S")
 
@@ -279,19 +397,20 @@ class App:
             log_attendance(name, code, "finger", "success")
             self.oled.show_lines([f"Hi {_short(name)}", "Code:", _short(code), t_now])
             time.sleep(3)
-            self.show_idle()
+            self.enter_idle()
             return
 
-        # not enrolled
+        # not enrolled (mapped)
         if self.prompt_enroll():
             enrollment_flow(self.sensor, self.oled, self.keypad)
             self.code_to_name = load_code_to_name(USERS_CSV)
             self.oled.show_lines(["DONE", "SCAN AGAIN", "", ""])
             time.sleep(1.5)
 
-        self.show_idle()
+        self.enter_idle()
 
     def handle_code_submit(self):
+        self.exit_idle()
         code = self.buf
         name = self.code_to_name.get(code)
         t_now = datetime.now().strftime("%H:%M:%S")
@@ -305,17 +424,19 @@ class App:
             self.oled.show_lines(["DENIED", "Invalid code", "", ""])
             time.sleep(1.5)
 
-        self.state = "IDLE"
-        self.buf = ""
-        self.show_idle()
+        self.enter_idle()
 
     def run(self):
-        self.show_idle()
         while True:
-            # Keypad always
+            # ---- IDLE animation tick ----
+            if self.state == "IDLE":
+                self.idle.tick()
+
+            # ---- Keypad events ----
             for ev, val in self.keypad.poll():
                 if ev == "key":
                     if self.state == "IDLE":
+                        self.exit_idle()
                         self.state = "ENTERING"
                         self.buf = ""
                     if self.state == "ENTERING" and len(self.buf) < 5:
@@ -329,39 +450,35 @@ class App:
                         self.last_ts = time.time()
                         self.show_buf()
                     elif self.state == "ENTERING" and not self.buf:
-                        self.state = "IDLE"
-                        self.show_idle()
+                        self.enter_idle()
 
                 elif ev == "enter":
                     if self.state == "ENTERING":
                         if len(self.buf) != 5:
+                            self.exit_idle()
                             self.oled.show_lines(["INVALID", "Need 5 digits", "", ""])
                             time.sleep(1.0)
-                            self.state = "IDLE"
-                            self.buf = ""
-                            self.show_idle()
+                            self.enter_idle()
                         else:
                             self.handle_code_submit()
 
-            # typing timeout
+            # ---- typing timeout ----
             if self.state == "ENTERING" and (time.time() - self.last_ts) > 10:
-                self.state = "IDLE"
-                self.buf = ""
-                self.show_idle()
+                self.enter_idle()
 
-            # Finger events (from background thread)
+            # ---- Finger events ----
             try:
                 while True:
                     fev, fid = self.fq.get_nowait()
                     if fev == "finger_ok":
-                        # reset keypad entry when finger happens
                         self.state = "IDLE"
                         self.buf = ""
                         self.handle_finger(int(fid))
             except queue.Empty:
                 pass
 
-            time.sleep(0.05)
+            time.sleep(0.02)
+
 
 def main():
     app = None
