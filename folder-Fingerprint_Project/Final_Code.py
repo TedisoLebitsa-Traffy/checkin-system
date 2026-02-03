@@ -250,6 +250,8 @@ def enroll_for_user(sensor: FingerVeinSensor, selected_user: dict, oled: OLED, k
     user_name = (selected_user.get(USER_NAME_COL) or "").strip()
 
     oled.show_lines(["ENROLL NEW", "ENTER=start", "BACK=cancel", ""])
+    start_enroll = False
+
     while True:
         for ev, _ in keypad.poll():
             if ev == "back":
@@ -257,7 +259,8 @@ def enroll_for_user(sensor: FingerVeinSensor, selected_user: dict, oled: OLED, k
             if ev == "enter":
                 start_enroll = True
                 break
-            
+        if start_enroll:
+            break  
         time.sleep(0.05)
 
     oled.show_lines(["FIND EMPTY ID", "PLEASE WAIT...", "", ""])
