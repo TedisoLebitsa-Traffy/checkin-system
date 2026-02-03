@@ -592,64 +592,64 @@ class App:
 
             time.sleep(0.02)
 
-def run_enrolment_py(self):
-    """
-    Runs enrolment.py as a separate process.
-    We pause background finger scanning and shut down the sensor first
-    so enrolment.py can safely use the hardware.
-    """
-    self.exit_idle()
-
-    # Pause worker (so it doesn't talk to sensor)
-    try:
-        self.fw.pause()
-        time.sleep(0.1)
-    except Exception:
-        pass
-
-    # Shutdown sensor so enrolment.py can open it cleanly
-    try:
-        with SENSOR_LOCK:
-            self.sensor.shutdown()
-    except Exception:
-        pass
-
-    # Run external script (blocking)
-    enrol_path = Path(__file__).resolve().parent / "Enrol_OLED.py"
-    self.oled.show_lines(["OPENING", "ENROLMENT...", "", ""])
-    time.sleep(0.5)
-
-    try:
-        subprocess.run(["python3", str(enrol_path)], check=False)
-    finally:
-        # Reconnect sensor afterwards
-        self.oled.show_lines(["RETURNING...", "RECONNECTING", "SENSOR...", ""])
-        time.sleep(0.5)
-
+    def run_enrolment_py(self):
+        """
+        Runs enrolment.py as a separate process.
+        We pause background finger scanning and shut down the sensor first
+        so enrolment.py can safely use the hardware.
+        """
+        self.exit_idle()
+    
+        # Pause worker (so it doesn't talk to sensor)
+        try:
+            self.fw.pause()
+            time.sleep(0.1)
+        except Exception:
+            pass
+    
+        # Shutdown sensor so enrolment.py can open it cleanly
         try:
             with SENSOR_LOCK:
-                self.sensor = FingerVeinSensor(baud_index=3)
-                ret = self.sensor.connect(SENSOR_PASSWORD)
-        except Exception:
-            ret = -1
-
-        if ret != 0:
-            self.oled.show_lines(["SENSOR FAIL", f"CODE:{ret}", "", ""])
-            time.sleep(2)
-
-        # Resume worker
-        try:
-            self.fw.resume()
+                self.sensor.shutdown()
         except Exception:
             pass
-
-        # Refresh names (in case CSV changed)
+    
+        # Run external script (blocking)
+        enrol_path = Path(__file__).resolve().parent / "Enrol_OLED.py"
+        self.oled.show_lines(["OPENING", "ENROLMENT...", "", ""])
+        time.sleep(0.5)
+    
         try:
-            self.code_to_name = load_code_to_name(USERS_CSV)
-        except Exception:
-            pass
-
-        self.enter_idle()
+            subprocess.run(["python3", str(enrol_path)], check=False)
+        finally:
+            # Reconnect sensor afterwards
+            self.oled.show_lines(["RETURNING...", "RECONNECTING", "SENSOR...", ""])
+            time.sleep(0.5)
+    
+            try:
+                with SENSOR_LOCK:
+                    self.sensor = FingerVeinSensor(baud_index=3)
+                    ret = self.sensor.connect(SENSOR_PASSWORD)
+            except Exception:
+                ret = -1
+    
+            if ret != 0:
+                self.oled.show_lines(["SENSOR FAIL", f"CODE:{ret}", "", ""])
+                time.sleep(2)
+    
+            # Resume worker
+            try:
+                self.fw.resume()
+            except Exception:
+                pass
+    
+            # Refresh names (in case CSV changed)
+            try:
+                self.code_to_name = load_code_to_name(USERS_CSV)
+            except Exception:
+                pass
+    
+            self.enter_idle()
 
 
 def main():
