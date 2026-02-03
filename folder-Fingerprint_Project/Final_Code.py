@@ -13,6 +13,8 @@ from PIL import Image  # <-- needed for idle frames
 from oled import OLED
 from keypad import KeypadUART
 from fingerprint_sensor import FingerVeinSensor
+import subprocess  # <-- put this at top of file with other imports
+
 
 # =========================
 # Config
@@ -402,6 +404,9 @@ class App:
     def __init__(self):
         self.oled = OLED()
         self.keypad = KeypadUART(KEYPAD_PORT, KEYPAD_BAUD)
+        self.enter_hold_start = None
+        self.enter_hold_active = False
+
 
         # Idle animator
         self.idle = IdleAnimator(
@@ -488,16 +493,9 @@ class App:
             self.enter_idle()
             return
 
-        # not enrolled (mapped)
-        if self.prompt_enroll():
-        
-            self.fw.pause()           # NEW: stop background sensor reads
-            time.sleep(0.1)           # small settle time
-            try:
-                enrollment_flow(self.sensor, self.oled, self.keypad, SENSOR_LOCK)
-            finally:
-                self.fw.resume()
-
+        # Not enrolled -> just show message and return to idle
+        self.oled.show_lines(["UNKNOWN FINGER", "NOT ENROLLED", "", ""])
+        time.sleep(1.5)
         self.enter_idle()
 
     def handle_code_submit(self):
@@ -525,7 +523,24 @@ class App:
 
             # ---- Keypad events ----
             for ev, val in self.keypad.poll():
-                if ev == "key":
+                 # --------- IDLE long-hold ENTER to open enrolment.py ----------
+                if self.state == "IDLE":
+                    if ev == "enter":
+                        # start hold timer
+                        self.enter_hold_start = time.time()
+                        self.enter_hold_active = True
+                        self.exit_idle()
+                        self.oled.show_lines(["HOLD ENTER", "5 SEC FOR", "ENROLMENT", ""])
+                    elif ev in ("key", "back", "PgUp", "PgDn"):
+                        # any other interaction cancels hold
+                        self.enter_hold_active = False
+                        self.enter_hold_start = None
+                        # return to normal IDLE animation ownership
+                        self.enter_idle()
+
+
+                
+                elif ev == "key":
                     if self.state == "IDLE":
                         self.exit_idle()
                         self.state = "ENTERING"
@@ -553,6 +568,13 @@ class App:
                         else:
                             self.handle_code_submit()
 
+            # ---- handle long-hold timer ----
+            if self.enter_hold_active and self.enter_hold_start is not None:
+                if (time.time() - self.enter_hold_start) >= 5.0:
+                    self.enter_hold_active = False
+                    self.enter_hold_start = None
+                    self.run_enrolment_py()
+           
             # ---- typing timeout ----
             if self.state == "ENTERING" and (time.time() - self.last_ts) > 10:
                 self.enter_idle()
@@ -569,6 +591,65 @@ class App:
                 pass
 
             time.sleep(0.02)
+
+def run_enrolment_py(self):
+    """
+    Runs enrolment.py as a separate process.
+    We pause background finger scanning and shut down the sensor first
+    so enrolment.py can safely use the hardware.
+    """
+    self.exit_idle()
+
+    # Pause worker (so it doesn't talk to sensor)
+    try:
+        self.fw.pause()
+        time.sleep(0.1)
+    except Exception:
+        pass
+
+    # Shutdown sensor so enrolment.py can open it cleanly
+    try:
+        with SENSOR_LOCK:
+            self.sensor.shutdown()
+    except Exception:
+        pass
+
+    # Run external script (blocking)
+    enrol_path = Path(__file__).resolve().parent / "enrolment.py"
+    self.oled.show_lines(["OPENING", "ENROLMENT...", "", ""])
+    time.sleep(0.5)
+
+    try:
+        subprocess.run(["python3", str(enrol_path)], check=False)
+    finally:
+        # Reconnect sensor afterwards
+        self.oled.show_lines(["RETURNING...", "RECONNECTING", "SENSOR...", ""])
+        time.sleep(0.5)
+
+        try:
+            with SENSOR_LOCK:
+                self.sensor = FingerVeinSensor(baud_index=3)
+                ret = self.sensor.connect(SENSOR_PASSWORD)
+        except Exception:
+            ret = -1
+
+        if ret != 0:
+            self.oled.show_lines(["SENSOR FAIL", f"CODE:{ret}", "", ""])
+            time.sleep(2)
+
+        # Resume worker
+        try:
+            self.fw.resume()
+        except Exception:
+            pass
+
+        # Refresh names (in case CSV changed)
+        try:
+            self.code_to_name = load_code_to_name(USERS_CSV)
+        except Exception:
+            pass
+
+        self.enter_idle()
 
 
 def main():
