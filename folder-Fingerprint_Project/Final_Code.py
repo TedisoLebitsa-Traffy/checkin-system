@@ -243,7 +243,7 @@ def choose_user_oled(users: list[dict], oled: OLED, keypad: KeypadUART) -> dict:
                     continue
                 return users[selected_abs_idx]
 
-def enroll_for_user(sensor: FingerVeinSensor, selected_user: dict, oled: OLED, keypad: KeypadUART) -> None:
+def enroll_for_user(sensor: FingerVeinSensor, selected_user: dict, oled: OLED, keypad: KeypadUART, sensor_lock: threading.Lock) -> None:
     finger_code_map = load_json(MAP_FILE)
     user_finger_map = load_json(USER_FINGER_MAP_FILE)
 
@@ -265,10 +265,13 @@ def enroll_for_user(sensor: FingerVeinSensor, selected_user: dict, oled: OLED, k
         time.sleep(0.05)
 
     oled.show_lines(["FIND EMPTY ID", "PLEASE WAIT...", "", ""])
-    finger_id = sensor.get_empty_id(start_id=0, end_id=200)
+    with sensor_lock:
+        finger_id = sensor.get_empty_id(start_id=0, end_id=200)
+
 
     oled.show_lines(["ENROLLING...", f"ID:{finger_id}", "FOLLOW SENSOR", ""])
-    result = sensor.enroll_user(user_id=finger_id, group_id=1, temp_num=3)
+    with sensor_lock:
+        result = sensor.enroll_user(user_id=finger_id, group_id=1, temp_num=3)
 
     if result != 0:
         oled.show_lines(["ENROLL FAIL", f"CODE:{result}", "", ""])
@@ -285,26 +288,25 @@ def enroll_for_user(sensor: FingerVeinSensor, selected_user: dict, oled: OLED, k
     oled.show_lines(["ENROLLED", _short(user_name), f"CODE:{user_code}", ""])
     time.sleep(2)
 
-def enrollment_flow(sensor: FingerVeinSensor, oled: OLED, keypad: KeypadUART) -> None:
+def enrollment_flow(sensor: FingerVeinSensor, oled: OLED, keypad: KeypadUART, sensor_lock: threading.Lock) -> None:
     users = load_users_from_csv(USERS_CSV)
     selected = choose_user_oled(users, oled, keypad)    
     if selected is None:
         # user cancelled → go back to idle
         return
-    enroll_for_user(sensor, selected, oled, keypad)
-    if selected is None:
-        # user cancelled → go back to idle
-        return
+    enroll_for_user(sensor, selected, oled, keypad, sensor_lock)
 
 
 # =========================
 # Finger scan background thread
 # =========================
 class FingerWorker(threading.Thread):
-    def __init__(self, sensor: FingerVeinSensor, out_q: queue.Queue):
+class FingerWorker(threading.Thread):
+    def __init__(self, sensor: FingerVeinSensor, out_q: queue.Queue, lock: threading.Lock):
         super().__init__(daemon=True)
         self.sensor = sensor
         self.out_q = out_q
+        self.lock = lock
         self._stop = threading.Event()
 
     def stop(self):
@@ -312,11 +314,20 @@ class FingerWorker(threading.Thread):
 
     def run(self):
         while not self._stop.is_set():
+            # Don't fight with enrollment: only run when sensor is free
+            got = self.lock.acquire(timeout=0.2)
+            if not got:
+                continue
             try:
                 fid = self.sensor.verify_and_get_id(user_id=0)  # blocks until scan completes
                 self.out_q.put(("finger_ok", fid))
             except Exception:
                 time.sleep(0.2)
+            finally:
+                try:
+                    self.lock.release()
+                except RuntimeError:
+                    pass
 
 
 # =========================
@@ -349,7 +360,7 @@ class App:
         self.last_ts = time.time()
 
         self.fq = queue.Queue()
-        self.fw = FingerWorker(self.sensor, self.fq)
+        self.fw = FingerWorker(self.sensor, self.fq, SENSOR_LOCK)
         self.fw.start()
 
         self.enter_idle()
@@ -414,7 +425,7 @@ class App:
 
         # not enrolled (mapped)
         if self.prompt_enroll():
-            enrollment_flow(self.sensor, self.oled, self.keypad)
+            enrollment_flow(self.sensor, self.oled, self.keypad, SENSOR_LOCK)
             self.code_to_name = load_code_to_name(USERS_CSV)
             self.oled.show_lines(["DONE", "SCAN AGAIN", "", ""])
             time.sleep(1.5)
