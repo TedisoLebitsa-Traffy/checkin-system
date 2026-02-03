@@ -255,10 +255,8 @@ def enroll_for_user(sensor: FingerVeinSensor, selected_user: dict, oled: OLED, k
             if ev == "back":
                 return
             if ev == "enter":
-                events = None
+                start_enroll = True
                 break
-        if events is None:
-            break
             
         time.sleep(0.05)
 
