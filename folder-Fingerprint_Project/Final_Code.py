@@ -284,8 +284,8 @@ def enrollment_flow(sensor: FingerVeinSensor, oled: OLED, keypad: KeypadUART) ->
     selected = choose_user_oled(users, oled, keypad)    
     enroll_for_user(sensor, selected, oled, keypad)
         if selected is None:
-        # user cancelled → go back to idle
-        return
+            # user cancelled → go back to idle
+            return
 
 
 # =========================
