@@ -615,7 +615,7 @@ def run_enrolment_py(self):
         pass
 
     # Run external script (blocking)
-    enrol_path = Path(__file__).resolve().parent / "enrolment.py"
+    enrol_path = Path(__file__).resolve().parent / "Enrol_OLED.py"
     self.oled.show_lines(["OPENING", "ENROLMENT...", "", ""])
     time.sleep(0.5)
 
