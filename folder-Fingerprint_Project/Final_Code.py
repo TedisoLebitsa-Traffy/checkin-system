@@ -26,6 +26,7 @@ USER_NAME_COL = "Employee Name"
 USER_CODE_COL = "Code"
 
 ATTENDANCE_LOG = Path("attendance_log.csv")
+SENSOR_LOCK = threading.Lock()
 
 # Mapping files
 MAP_FILE = Path("finger_code_map.json")             # finger_id(str) -> user_code(str)
