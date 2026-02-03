@@ -348,10 +348,9 @@ def enrollment_flow(sensor: FingerVeinSensor, oled: OLED, keypad: KeypadUART, se
     users = load_users_from_csv(USERS_CSV)
     selected = choose_user_oled(users, oled, keypad)    
     if selected is None:
-        # user cancelled → go back to idle
+        # user cancelled ? go back to idle
         return
     enroll_finger_for_selected_user(sensor, selected, oled, keypad, sensor_lock)
-
 
 
 # =========================
@@ -359,24 +358,34 @@ def enrollment_flow(sensor: FingerVeinSensor, oled: OLED, keypad: KeypadUART, se
 # =========================
 
 class FingerWorker(threading.Thread):
-    def __init__(self, sensor: FingerVeinSensor, out_q: queue.Queue, lock: threading.Lock):
+def __init__(self, sensor: FingerVeinSensor, out_q: queue.Queue, lock: threading.Lock):
         super().__init__(daemon=True)
         self.sensor = sensor
         self.out_q = out_q
         self.lock = lock
         self._stop = threading.Event()
+        self._pause = threading.Event()   # NEW
 
     def stop(self):
         self._stop.set()
 
+    def pause(self):
+        self._pause.set()
+
+    def resume(self):
+        self._pause.clear()
+
     def run(self):
         while not self._stop.is_set():
-            # Don't fight with enrollment: only run when sensor is free
+            if self._pause.is_set():
+                time.sleep(0.05)
+                continue
+
             got = self.lock.acquire(timeout=0.2)
             if not got:
                 continue
             try:
-                fid = self.sensor.verify_and_get_id(user_id=0)  # blocks until scan completes
+                fid = self.sensor.verify_and_get_id(user_id=0)  # may block
                 self.out_q.put(("finger_ok", fid))
             except Exception:
                 time.sleep(0.2)
@@ -385,7 +394,6 @@ class FingerWorker(threading.Thread):
                     self.lock.release()
                 except RuntimeError:
                     pass
-
 
 # =========================
 # Main App
@@ -482,10 +490,13 @@ class App:
 
         # not enrolled (mapped)
         if self.prompt_enroll():
-            enrollment_flow(self.sensor, self.oled, self.keypad, SENSOR_LOCK)
-            self.code_to_name = load_code_to_name(USERS_CSV)
-            self.oled.show_lines(["DONE", "SCAN AGAIN", "", ""])
-            time.sleep(1.5)
+        
+            self.fw.pause()           # NEW: stop background sensor reads
+            time.sleep(0.1)           # small settle time
+            try:
+                enrollment_flow(self.sensor, self.oled, self.keypad, SENSOR_LOCK)
+            finally:
+                self.fw.resume()
 
         self.enter_idle()
 
