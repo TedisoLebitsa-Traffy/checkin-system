@@ -437,14 +437,39 @@ class App:
 
     def shutdown(self):
         try:
+            self.disconnect_sensor()
+        except Exception:
+            pass
+    
+        try:
             self.fw.stop()
         except Exception:
             pass
+        
+    def disconnect_sensor(self):
+        """
+        Safely disconnect the fingerprint sensor and release UART.
+        Call this before power-off or exit.
+        """
         try:
-            self.sensor.shutdown()
+            # Stop background worker first
+            try:
+                self.fw.pause()
+            except Exception:
+                pass
+    
+            with SENSOR_LOCK:
+                try:
+                    self.sensor.shutdown()
+                except Exception:
+                    pass
+    
+            self.oled.show_lines(["SENSOR", "DISCONNECTED", "", ""])
+            time.sleep(0.5)
+    
         except Exception:
             pass
-
+    
     # ----- Idle control -----
     def enter_idle(self):
         self.state = "IDLE"
@@ -522,10 +547,11 @@ class App:
                 self.idle.tick()
 
             # ---- Keypad events ----
-            for ev, val in self.keypad.poll(): ---------------- MENU key (ASCII 1) -> open enrolment.py ----------------
-                
+            for ev, val in self.keypad.poll(): 
+            #---------------- MENU key (ASCII 1) -> open enrolment.py ----------------    
             # MENU arrives as ASCII 1, which can come as '\x01' (best), sometimes 1.
                 if self.state == "IDLE" and ev == "Menu" :
+                    self.oled.show_lines(["INVALID", "Need 5 digits", "", ""])
                     self.exit_idle()
                     self.run_enrolment_py()
                     continue
@@ -651,6 +677,8 @@ def main():
     try:
         app = App()
         app.run()
+    except KeyboardInterrupt:
+        pass
     finally:
         if app:
             app.shutdown()
