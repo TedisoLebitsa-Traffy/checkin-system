@@ -360,7 +360,7 @@ def enrollment_flow(sensor: FingerVeinSensor, oled: OLED, keypad: KeypadUART, se
 # =========================
 
 class FingerWorker(threading.Thread):
-def __init__(self, sensor: FingerVeinSensor, out_q: queue.Queue, lock: threading.Lock):
+    def __init__(self, sensor: FingerVeinSensor, out_q: queue.Queue, lock: threading.Lock):
         super().__init__(daemon=True)
         self.sensor = sensor
         self.out_q = out_q
