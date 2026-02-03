@@ -243,50 +243,106 @@ def choose_user_oled(users: list[dict], oled: OLED, keypad: KeypadUART) -> dict:
                     continue
                 return users[selected_abs_idx]
 
-def enroll_for_user(sensor: FingerVeinSensor, selected_user: dict, oled: OLED, keypad: KeypadUART, sensor_lock: threading.Lock) -> None:
+def enroll_finger_for_selected_user(
+    sensor: FingerVeinSensor,
+    selected_user: dict,
+    oled: OLED,
+    keypad: KeypadUART,
+    sensor_lock: threading.Lock,
+    start_id=0,
+    end_id=200
+) -> bool:
+    """
+    Enrolls finger for the selected CSV user.
+    Writes:
+      - finger_code_map.json: finger_id(str) -> user_code(str from CSV)
+      - user_finger_map.json: user_code -> {finger_id, code, name}
+    Returns True on success, False on cancel/fail.
+    """
     finger_code_map = load_json(MAP_FILE)
     user_finger_map = load_json(USER_FINGER_MAP_FILE)
 
     user_code = (selected_user.get(USER_CODE_COL) or "").strip()
     user_name = (selected_user.get(USER_NAME_COL) or "").strip()
 
-    oled.show_lines(["ENROLL NEW", "ENTER=start", "BACK=cancel", ""])
-    start_enroll = False
+    if not user_code:
+        oled.show_lines(["CSV ERROR", "Missing Code", "", ""])
+        time.sleep(2)
+        return False
 
+    # If user already linked, allow KEEP or enroll NEW
+    if user_code in user_finger_map:
+        existing = user_finger_map[user_code]
+        oled.show_lines([
+            "ALREADY LINKED",
+            _short(user_code),
+            _short(f"FID:{existing.get('finger_id')}"),
+            "ENTER=NEW BACK=KEEP"
+        ])
+
+        while True:
+            for ev, _ in keypad.poll():
+                if ev == "back":
+                    return False  # keep existing, go back to idle/menu
+                if ev == "enter":
+                    break
+            else:
+                time.sleep(0.05)
+                continue
+            break
+
+    # Confirm start
+    oled.show_lines(["ENROLL NEW", "PRESS ENTER", "BACK=cancel", ""])
     while True:
-        for ev, _ in keypad.poll():
+        for ev, val in keypad.poll():
             if ev == "back":
-                return
+                return False
             if ev == "enter":
-                start_enroll = True
                 break
-        if start_enroll:
-            break  
-        time.sleep(0.05)
+        else:
+            time.sleep(0.05)
+            continue
+        break
 
+    # Find empty ID (lock to avoid worker conflict)
     oled.show_lines(["FIND EMPTY ID", "PLEASE WAIT...", "", ""])
     with sensor_lock:
-        finger_id = sensor.get_empty_id(start_id=0, end_id=200)
+        finger_id = sensor.get_empty_id(start_id=start_id, end_id=end_id)
 
-
-    oled.show_lines(["ENROLLING...", f"ID:{finger_id}", "FOLLOW SENSOR", ""])
+    # Enroll (lock as well)
+    oled.show_lines(["ENROLLING...", f"ID: {finger_id}", "FOLLOW SENSOR", ""])
     with sensor_lock:
         result = sensor.enroll_user(user_id=finger_id, group_id=1, temp_num=3)
 
     if result != 0:
+        # 10 is often "duplicate finger" in many libraries; keep same UX
+        if result == 10:
+            oled.show_lines(["FINGER EXISTS", "TRY AGAIN", "ENTER=retry", "BACK=stop"])
+            while True:
+                for ev, _ in keypad.poll():
+                    if ev == "back":
+                        return False
+                    if ev == "enter":
+                        return enroll_finger_for_selected_user(
+                            sensor, selected_user, oled, keypad, sensor_lock, start_id, end_id
+                        )
+                time.sleep(0.05)
+
         oled.show_lines(["ENROLL FAIL", f"CODE:{result}", "", ""])
         time.sleep(2)
-        return
+        return False
 
-    # ? link finger_id -> CSV code
+    # SUCCESS: link finger_id -> CSV user_code
     finger_code_map[str(finger_id)] = user_code
     save_json(MAP_FILE, finger_code_map)
 
+    # Link CSV code -> finger + name
     user_finger_map[user_code] = {"finger_id": finger_id, "code": user_code, "name": user_name}
     save_json(USER_FINGER_MAP_FILE, user_finger_map)
 
-    oled.show_lines(["ENROLLED", _short(user_name), f"CODE:{user_code}", ""])
+    oled.show_lines(["ENROLLED", _short(user_name or user_code), f"CODE:{user_code}", ""])
     time.sleep(2)
+    return True
 
 def enrollment_flow(sensor: FingerVeinSensor, oled: OLED, keypad: KeypadUART, sensor_lock: threading.Lock) -> None:
     users = load_users_from_csv(USERS_CSV)
@@ -294,13 +350,14 @@ def enrollment_flow(sensor: FingerVeinSensor, oled: OLED, keypad: KeypadUART, se
     if selected is None:
         # user cancelled → go back to idle
         return
-    enroll_for_user(sensor, selected, oled, keypad, sensor_lock)
+    enroll_finger_for_selected_user(sensor, selected, oled, keypad, sensor_lock)
+
 
 
 # =========================
 # Finger scan background thread
 # =========================
-class FingerWorker(threading.Thread):
+
 class FingerWorker(threading.Thread):
     def __init__(self, sensor: FingerVeinSensor, out_q: queue.Queue, lock: threading.Lock):
         super().__init__(daemon=True)
