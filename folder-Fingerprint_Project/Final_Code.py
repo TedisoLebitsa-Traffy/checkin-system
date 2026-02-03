@@ -522,34 +522,28 @@ class App:
                 self.idle.tick()
 
             # ---- Keypad events ----
-            for ev, val in self.keypad.poll():
-                 # --------- IDLE long-hold ENTER to open enrolment.py ----------
-                if self.state == "IDLE":
-                    if ev == "enter":
-                        # start hold timer
-                        self.enter_hold_start = time.time()
-                        self.enter_hold_active = True
-                        self.exit_idle()
-                        self.oled.show_lines(["HOLD ENTER", "5 SEC FOR", "ENROLMENT", ""])
-                    elif ev in ("key", "back", "PgUp", "PgDn"):
-                        # any other interaction cancels hold
-                        self.enter_hold_active = False
-                        self.enter_hold_start = None
-                        # return to normal IDLE animation ownership
-                        self.enter_idle()
-
-
+            for ev, val in self.keypad.poll(): ---------------- MENU key (ASCII 1) -> open enrolment.py ----------------
                 
-                elif ev == "key":
+            # MENU arrives as ASCII 1, which can come as '\x01' (best), sometimes 1.
+                if self.state == "IDLE" and ev == "Menu" :
+                    self.exit_idle()
+                    self.run_enrolment_py()
+                    continue
+                # ------------------------------------------------------------------------
+            
+                # Normal digit entry to start typing code
+                if ev == "key":
                     if self.state == "IDLE":
                         self.exit_idle()
                         self.state = "ENTERING"
                         self.buf = ""
-                    if self.state == "ENTERING" and len(self.buf) < 5:
-                        self.buf += val
+            
+                    # Only accept digits into the code buffer
+                    if self.state == "ENTERING" and val and str(val).isdigit() and len(self.buf) < 5:
+                        self.buf += str(val)
                         self.last_ts = time.time()
                         self.show_buf()
-
+            
                 elif ev == "back":
                     if self.state == "ENTERING" and self.buf:
                         self.buf = self.buf[:-1]
@@ -557,7 +551,7 @@ class App:
                         self.show_buf()
                     elif self.state == "ENTERING" and not self.buf:
                         self.enter_idle()
-
+            
                 elif ev == "enter":
                     if self.state == "ENTERING":
                         if len(self.buf) != 5:
