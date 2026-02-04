@@ -13,8 +13,6 @@ from PIL import Image  # <-- needed for idle frames
 from oled import OLED
 from keypad import KeypadUART
 from fingerprint_sensor import FingerVeinSensor
-import subprocess  # <-- put this at top of file with other imports
-
 
 # =========================
 # Config
@@ -33,8 +31,6 @@ SENSOR_LOCK = threading.Lock()
 # Mapping files
 MAP_FILE = Path("finger_code_map.json")             # finger_id(str) -> user_code(str)
 USER_FINGER_MAP_FILE = Path("user_finger_map.json") # user_code(str) -> {finger_id, code, name}
-
-ITEMS_PER_PAGE = 2  # OLED 4 lines => 2 users shown
 
 # ---- Idle animation settings ----
 IDLE_FRAMES_DIR = Path("idle_frames")
@@ -175,184 +171,14 @@ def _short(s: str, max_len: int = 21) -> str:
     s = (s or "").strip()
     return s if len(s) <= max_len else (s[: max_len - 1] + ".")
 
-
-# =========================
-# Enrollment UI (OLED)
-# =========================
-def choose_user_oled(users: list[dict], oled: OLED, keypad: KeypadUART) -> dict:
-    page = 0
-    selected_abs_idx = None
-    total_pages = (len(users) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
-
-    def render():
-        nonlocal page, selected_abs_idx
-        start = page * ITEMS_PER_PAGE
-        end = min(start + ITEMS_PER_PAGE, len(users))
-        visible = users[start:end]
-
-        header = f"USER {page+1}/{total_pages}"
-        footer = "PgUp/PgDn 1-2 Sel" if selected_abs_idx is None else "ENTER=OK BACK=CAN"
-
-        lines = [_short(header)]
-        for i in range(ITEMS_PER_PAGE):
-            if i < len(visible):
-                u = visible[i]
-                code = (u.get(USER_CODE_COL) or "").strip()
-                name = (u.get(USER_NAME_COL) or "").strip()
-                label = f"{i+1}) {code}"
-                if name:
-                    label += f" {name}"
-                abs_idx = start + i
-                prefix = ">" if selected_abs_idx == abs_idx else " "
-                lines.append(_short(prefix + label))
-            else:
-                lines.append("")
-        lines.append(_short(footer))
-        oled.show_lines(lines)
-
-    render()
-
-    while True:
-        events = keypad.poll()
-        if not events:
-            time.sleep(0.05)
-            continue
-
-        for event, value in events:
-            if event == "PgUp":
-                page = (page + 1) % total_pages
-                selected_abs_idx = None
-                render()
-            elif event == "PgDn":
-                page = (page - 1) % total_pages
-                selected_abs_idx = None
-                render()
-            elif event == "back":
-                return None
-            elif event == "key" and value and value.isdigit():
-                pick = int(value)
-                start = page * ITEMS_PER_PAGE
-                end = min(start + ITEMS_PER_PAGE, len(users))
-                visible_count = end - start
-                if 1 <= pick <= visible_count:
-                    selected_abs_idx = start + (pick - 1)
-                    render()
-            elif event == "enter":
-                if selected_abs_idx is None:
-                    oled.show_lines(["NO SELECTION", "PRESS 1-2", "", ""])
-                    time.sleep(0.8)
-                    render()
-                    continue
-                return users[selected_abs_idx]
-
-def enroll_finger_for_selected_user(
-    sensor: FingerVeinSensor,
-    selected_user: dict,
-    oled: OLED,
-    keypad: KeypadUART,
-    sensor_lock: threading.Lock,
-    start_id=0,
-    end_id=200
-) -> bool:
-    """
-    Enrolls finger for the selected CSV user.
-    Writes:
-      - finger_code_map.json: finger_id(str) -> user_code(str from CSV)
-      - user_finger_map.json: user_code -> {finger_id, code, name}
-    Returns True on success, False on cancel/fail.
-    """
-    finger_code_map = load_json(MAP_FILE)
-    user_finger_map = load_json(USER_FINGER_MAP_FILE)
-
-    user_code = (selected_user.get(USER_CODE_COL) or "").strip()
-    user_name = (selected_user.get(USER_NAME_COL) or "").strip()
-
-    if not user_code:
-        oled.show_lines(["CSV ERROR", "Missing Code", "", ""])
-        time.sleep(2)
-        return False
-
-    # If user already linked, allow KEEP or enroll NEW
-    if user_code in user_finger_map:
-        existing = user_finger_map[user_code]
-        oled.show_lines([
-            "ALREADY LINKED",
-            _short(user_code),
-            _short(f"FID:{existing.get('finger_id')}"),
-            "ENTER=NEW BACK=KEEP"
-        ])
-
-        while True:
-            for ev, _ in keypad.poll():
-                if ev == "back":
-                    return False  # keep existing, go back to idle/menu
-                if ev == "enter":
-                    break
-            else:
-                time.sleep(0.05)
-                continue
-            break
-
-    # Confirm start
-    oled.show_lines(["ENROLL NEW", "PRESS ENTER", "BACK=cancel", ""])
-    while True:
-        for ev, val in keypad.poll():
-            if ev == "back":
-                return False
-            if ev == "enter":
-                break
-        else:
-            time.sleep(0.05)
-            continue
-        break
-
-    # Find empty ID (lock to avoid worker conflict)
-    oled.show_lines(["FIND EMPTY ID", "PLEASE WAIT...", "", ""])
-    with sensor_lock:
-        finger_id = sensor.get_empty_id(start_id=start_id, end_id=end_id)
-
-    # Enroll (lock as well)
-    oled.show_lines(["ENROLLING...", f"ID: {finger_id}", "FOLLOW SENSOR", ""])
-    with sensor_lock:
-        result = sensor.enroll_user(user_id=finger_id, group_id=1, temp_num=3)
-
-    if result != 0:
-        # 10 is often "duplicate finger" in many libraries; keep same UX
-        if result == 10:
-            oled.show_lines(["FINGER EXISTS", "TRY AGAIN", "ENTER=retry", "BACK=stop"])
-            while True:
-                for ev, _ in keypad.poll():
-                    if ev == "back":
-                        return False
-                    if ev == "enter":
-                        return enroll_finger_for_selected_user(
-                            sensor, selected_user, oled, keypad, sensor_lock, start_id, end_id
-                        )
-                time.sleep(0.05)
-
-        oled.show_lines(["ENROLL FAIL", f"CODE:{result}", "", ""])
-        time.sleep(2)
-        return False
-
-    # SUCCESS: link finger_id -> CSV user_code
-    finger_code_map[str(finger_id)] = user_code
-    save_json(MAP_FILE, finger_code_map)
-
-    # Link CSV code -> finger + name
-    user_finger_map[user_code] = {"finger_id": finger_id, "code": user_code, "name": user_name}
-    save_json(USER_FINGER_MAP_FILE, user_finger_map)
-
-    oled.show_lines(["ENROLLED", _short(user_name or user_code), f"CODE:{user_code}", ""])
-    time.sleep(2)
-    return True
-
-def enrollment_flow(sensor: FingerVeinSensor, oled: OLED, keypad: KeypadUART, sensor_lock: threading.Lock) -> None:
-    users = load_users_from_csv(USERS_CSV)
-    selected = choose_user_oled(users, oled, keypad)    
-    if selected is None:
-        # user cancelled ? go back to idle
-        return
-    enroll_finger_for_selected_user(sensor, selected, oled, keypad, sensor_lock)
+def finger_lookup(finger_id: int) -> tuple:
+    """Check if finger ID is mapped to a user code."""
+    finger_code_map = load_json(MAP_FILE)  # finger_id -> user_code
+    code = finger_code_map.get(str(finger_id))
+    if not code:
+        return (False, None, None)
+    name = load_code_to_name(USERS_CSV).get(code, "UNKNOWN")
+    return (True, code, name)
 
 
 # =========================
@@ -366,29 +192,19 @@ class FingerWorker(threading.Thread):
         self.out_q = out_q
         self.lock = lock
         self._stop = threading.Event()
-        self._pause = threading.Event()   # NEW
 
     def stop(self):
         self._stop.set()
 
-    def pause(self):
-        self._pause.set()
-
-    def resume(self):
-        self._pause.clear()
-
     def run(self):
         while not self._stop.is_set():
-            if self._pause.is_set():
-                time.sleep(0.05)
-                continue
-
             got = self.lock.acquire(timeout=0.2)
             if not got:
                 continue
             try:
                 fid = self.sensor.verify_and_get_id(user_id=0)  # may block
-                self.out_q.put(("finger_ok", fid))
+                if fid >= 0:  # Only process valid finger IDs
+                    self.out_q.put(("finger_ok", fid))
             except Exception:
                 time.sleep(0.2)
             finally:
@@ -397,6 +213,7 @@ class FingerWorker(threading.Thread):
                 except RuntimeError:
                     pass
 
+
 # =========================
 # Main App
 # =========================
@@ -404,9 +221,6 @@ class App:
     def __init__(self):
         self.oled = OLED()
         self.keypad = KeypadUART(KEYPAD_PORT, KEYPAD_BAUD)
-        self.enter_hold_start = None
-        self.enter_hold_active = False
-
 
         # Idle animator
         self.idle = IdleAnimator(
@@ -417,11 +231,19 @@ class App:
             retries=IDLE_RETRIES
         )
 
+        # Initialize sensor
         self.sensor = FingerVeinSensor(baud_index=3)
         ret = self.sensor.connect(SENSOR_PASSWORD)
+        
         if ret != 0:
             self.oled.show_lines(["SENSOR FAIL", f"CODE:{ret}", "", ""])
-            raise RuntimeError("Sensor connect failed")
+            time.sleep(3)
+            # Try to shutdown even if connection failed
+            try:
+                self.sensor.shutdown()
+            except:
+                pass
+            raise RuntimeError(f"Sensor connect failed with code: {ret}")
 
         self.code_to_name = load_code_to_name(USERS_CSV)
 
@@ -436,40 +258,46 @@ class App:
         self.enter_idle()
 
     def shutdown(self):
+        """Clean shutdown of all components."""
+        print("\nShutting down system...")
+        
+        # Stop finger worker thread first
+        if hasattr(self, 'fw') and self.fw:
+            try:
+                print("Stopping finger worker thread...")
+                self.fw.stop()
+                self.fw.join(timeout=1.0)
+                print("Finger worker stopped")
+            except Exception as e:
+                print(f"Error stopping finger worker: {e}")
+        
+        # Proper sensor shutdown
+        if hasattr(self, 'sensor') and self.sensor:
+            try:
+                print("Shutting down sensor...")
+                
+                # Try manufacturer's CloseConnectDev first
+                if hasattr(self.sensor, 'CloseConnectDev'):
+                    print("Using CloseConnectDev...")
+                    ret = self.sensor.CloseConnectDev(3000)
+                    print(f"CloseConnectDev returned: {ret}")
+                else:
+                    # Use regular shutdown
+                    self.sensor.shutdown()
+                    print("Sensor shutdown complete")
+                    
+            except Exception as e:
+                print(f"Error during sensor shutdown: {e}")
+        
+        # Clear OLED
         try:
-            self.disconnect_sensor()
-        except Exception:
-            pass
-    
-        try:
-            self.fw.stop()
-        except Exception:
+            self.oled.clear()
+            print("OLED cleared")
+        except:
             pass
         
-    def disconnect_sensor(self):
-        """
-        Safely disconnect the fingerprint sensor and release UART.
-        Call this before power-off or exit.
-        """
-        try:
-            # Stop background worker first
-            try:
-                self.fw.pause()
-            except Exception:
-                pass
-    
-            with SENSOR_LOCK:
-                try:
-                    self.sensor.shutdown()
-                except Exception:
-                    pass
-    
-            self.oled.show_lines(["SENSOR", "DISCONNECTED", "", ""])
-            time.sleep(0.5)
-    
-        except Exception:
-            pass
-    
+        print("System shutdown complete")
+
     # ----- Idle control -----
     def enter_idle(self):
         self.state = "IDLE"
@@ -485,30 +313,9 @@ class App:
         self.exit_idle()
         self.oled.show_lines(["ENTER CODE:", self.buf, "ENTER=submit", "BACK=delete"])
 
-    def finger_lookup(self, finger_id: int):
-        finger_code_map = load_json(MAP_FILE)  # finger_id -> user_code
-        code = finger_code_map.get(str(finger_id))
-        if not code:
-            return (False, None, None)
-        name = self.code_to_name.get(code, "UNKNOWN")
-        return (True, code, name)
-
-    def prompt_enroll(self) -> bool:
-        self.exit_idle()
-        self.oled.show_lines(["FINGER UNKNOWN", "ENROLL NOW?", "ENTER=yes", "BACK=no"])
-        start = time.time()
-        while time.time() - start < 10:
-            for ev, _ in self.keypad.poll():
-                if ev == "enter":
-                    return True
-                if ev == "back":
-                    return False
-            time.sleep(0.05)
-        return False
-
     def handle_finger(self, finger_id: int):
         self.exit_idle()
-        enrolled, code, name = self.finger_lookup(finger_id)
+        enrolled, code, name = finger_lookup(finger_id)
         t_now = datetime.now().strftime("%H:%M:%S")
 
         if enrolled:
@@ -547,16 +354,7 @@ class App:
                 self.idle.tick()
 
             # ---- Keypad events ----
-            for ev, val in self.keypad.poll(): 
-            #---------------- MENU key (ASCII 1) -> open enrolment.py ----------------    
-            # MENU arrives as ASCII 1, which can come as '\x01' (best), sometimes 1.
-                if self.state == "IDLE" and ev == "Menu" :
-                    self.oled.show_lines(["INVALID", "Need 5 digits", "", ""])
-                    self.exit_idle()
-                    self.run_enrolment_py()
-                    continue
-                # ------------------------------------------------------------------------
-            
+            for ev, val in self.keypad.poll():
                 # Normal digit entry to start typing code
                 if ev == "key":
                     if self.state == "IDLE":
@@ -588,13 +386,6 @@ class App:
                         else:
                             self.handle_code_submit()
 
-            # ---- handle long-hold timer ----
-            if self.enter_hold_active and self.enter_hold_start is not None:
-                if (time.time() - self.enter_hold_start) >= 5.0:
-                    self.enter_hold_active = False
-                    self.enter_hold_start = None
-                    self.run_enrolment_py()
-           
             # ---- typing timeout ----
             if self.state == "ENTERING" and (time.time() - self.last_ts) > 10:
                 self.enter_idle()
@@ -612,65 +403,6 @@ class App:
 
             time.sleep(0.02)
 
-    def run_enrolment_py(self):
-        """
-        Runs enrolment.py as a separate process.
-        We pause background finger scanning and shut down the sensor first
-        so enrolment.py can safely use the hardware.
-        """
-        self.exit_idle()
-    
-        # Pause worker (so it doesn't talk to sensor)
-        try:
-            self.fw.pause()
-            time.sleep(0.1)
-        except Exception:
-            pass
-    
-        # Shutdown sensor so enrolment.py can open it cleanly
-        try:
-            with SENSOR_LOCK:
-                self.sensor.shutdown()
-        except Exception:
-            pass
-    
-        # Run external script (blocking)
-        enrol_path = Path(__file__).resolve().parent / "Enrol_OLED.py"
-        self.oled.show_lines(["OPENING", "ENROLMENT...", "", ""])
-        time.sleep(0.5)
-    
-        try:
-            subprocess.run(["python3", str(enrol_path)], check=False)
-        finally:
-            # Reconnect sensor afterwards
-            self.oled.show_lines(["RETURNING...", "RECONNECTING", "SENSOR...", ""])
-            time.sleep(0.5)
-    
-            try:
-                with SENSOR_LOCK:
-                    self.sensor = FingerVeinSensor(baud_index=3)
-                    ret = self.sensor.connect(SENSOR_PASSWORD)
-            except Exception:
-                ret = -1
-    
-            if ret != 0:
-                self.oled.show_lines(["SENSOR FAIL", f"CODE:{ret}", "", ""])
-                time.sleep(2)
-    
-            # Resume worker
-            try:
-                self.fw.resume()
-            except Exception:
-                pass
-    
-            # Refresh names (in case CSV changed)
-            try:
-                self.code_to_name = load_code_to_name(USERS_CSV)
-            except Exception:
-                pass
-    
-            self.enter_idle()
-
 
 def main():
     app = None
@@ -678,10 +410,13 @@ def main():
         app = App()
         app.run()
     except KeyboardInterrupt:
-        pass
+        print("\nShutting down via Ctrl+C...")
+    except Exception as e:
+        print(f"Error: {e}")
     finally:
         if app:
             app.shutdown()
+
 
 if __name__ == "__main__":
     main()
