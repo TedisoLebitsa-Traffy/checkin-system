@@ -39,6 +39,9 @@ IDLE_FPS = 8           # safe start; raise if stable
 IDLE_STEP = 3          # frame skipping (bigger = faster animation)
 IDLE_RETRIES = 3       # retry OLED display on occasional I2C glitches
 
+# ---- Finger debouncing settings ----
+FINGER_COOLDOWN = 2.0  # seconds between allowed finger scans
+
 
 # =========================
 # Idle Animator (frames -> OLED)
@@ -226,6 +229,8 @@ class FingerWorker(threading.Thread):
         self.out_q = out_q
         self.lock = lock
         self._stop = threading.Event()
+        self.last_reported_fid = -1  # Track last finger ID
+        self.last_detection_time = 0  # Track last detection time
 
     def stop(self):
         self._stop.set()
@@ -238,7 +243,14 @@ class FingerWorker(threading.Thread):
             try:
                 fid = self.sensor.verify_and_get_id(user_id=0)  # may block
                 if fid >= 0:  # Only process valid finger IDs
-                    self.out_q.put(("finger_ok", fid))
+                    now = time.time()
+                    # Only report if:
+                    # 1. Different finger, OR
+                    # 2. Same finger but > 2 seconds since last detection
+                    if fid != self.last_reported_fid or (now - self.last_detection_time) > 2.0:
+                        self.last_reported_fid = fid
+                        self.last_detection_time = now
+                        self.out_q.put(("finger_ok", fid))
             except Exception:
                 time.sleep(0.2)
             finally:
@@ -284,6 +296,10 @@ class App:
         self.state = "IDLE"
         self.buf = ""
         self.last_ts = time.time()
+        
+        # Finger debouncing variables
+        self.last_finger_time = 0
+        self.finger_cooldown = FINGER_COOLDOWN
 
         self.fq = queue.Queue()
         self.fw = FingerWorker(self.sensor, self.fq, SENSOR_LOCK)
@@ -345,6 +361,14 @@ class App:
         
         print("System shutdown complete")
 
+    def clear_finger_queue(self):
+        """Clear all pending finger events from the queue."""
+        try:
+            while True:
+                self.fq.get_nowait()
+        except queue.Empty:
+            pass
+
     # ----- Idle control -----
     def enter_idle(self):
         self.state = "IDLE"
@@ -361,10 +385,19 @@ class App:
         self.oled.show_lines(["ENTER CODE:", self.buf, "ENTER=submit", "BACK=delete"])
 
     # =========================
-    # UPDATED: Handle Finger with IN/OUT logic
+    # UPDATED: Handle Finger with IN/OUT logic and debouncing
     # =========================
     def handle_finger(self, finger_id: int):
+        # Debounce check
+        now = time.time()
+        if (now - self.last_finger_time) < self.finger_cooldown:
+            # Clear any queued events during cooldown
+            self.clear_finger_queue()
+            return
+        
+        self.last_finger_time = now
         self.exit_idle()
+        
         enrolled, code, name = finger_lookup(finger_id)
         
         if not enrolled:
@@ -373,6 +406,9 @@ class App:
             self.enter_idle()
             return
 
+        # Clear any queued events after successful detection
+        self.clear_finger_queue()
+        
         # Determine IN/OUT action
         current_status = get_user_status(code)
         action = "OUT" if current_status == "IN" else "IN"
@@ -405,7 +441,10 @@ class App:
     # UPDATED: Handle Code with IN/OUT logic
     # =========================
     def handle_code_submit(self):
+        # Update last finger time for code entries too (to prevent immediate finger scan after code)
+        self.last_finger_time = time.time()
         self.exit_idle()
+        
         code = self.buf
         name = self.code_to_name.get(code)
         
