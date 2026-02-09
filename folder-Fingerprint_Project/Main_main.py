@@ -396,7 +396,7 @@ class App:
         enrolled, code, name = finger_lookup(finger_id)
         
         if not enrolled:
-            self.oled.show_lines(["UNKNOWN FINGER", "NOT ENROLLED", "", ""])
+            #self.oled.show_lines(["UNKNOWN FINGER", "NOT ENROLLED", "", ""])
             time.sleep(1.5)
             self.enter_idle()
             return
